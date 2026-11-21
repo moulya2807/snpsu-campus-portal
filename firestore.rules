@@ -1,0 +1,97 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function getUserRole() {
+      return request.auth.token.role;
+    }
+    
+    function isDeanOrHOD() {
+      return isAuthenticated() && (getUserRole() in ['DEAN', 'HOD', 'ADMIN']);
+    }
+    
+    function isFaculty() {
+      return isAuthenticated() && (getUserRole() == 'FACULTY');
+    }
+    
+    function isStudent() {
+      return isAuthenticated() && (getUserRole() == 'STUDENT');
+    }
+    
+    function isOwnerStudent(usn) {
+      return isStudent() && request.auth.token.usn == usn;
+    }
+
+    // 1. Schools, Departments & Programs (Read: All authenticated, Write: Dean/Admin)
+    match /schools/{schoolId} {
+      allow read: if isAuthenticated();
+      allow write: if isDeanOrHOD();
+    }
+    
+    match /departments/{deptId} {
+      allow read: if isAuthenticated();
+      allow write: if isDeanOrHOD();
+    }
+    
+    match /programs/{programId} {
+      allow read: if isAuthenticated();
+      allow write: if isDeanOrHOD();
+    }
+
+    // 2. Students Collection: Student reads only their USN, Faculty/HOD reads batch
+    match /students/{usn} {
+      allow read: if isDeanOrHOD() || isFaculty() || isOwnerStudent(usn);
+      allow write: if isDeanOrHOD();
+    }
+
+    // 3. CBCS Subjects & Timetable Slots
+    match /subjects_cbcs/{subjectCode} {
+      allow read: if isAuthenticated();
+      allow write: if isDeanOrHOD();
+    }
+
+    match /timetable_slots/{slotId} {
+      allow read: if isAuthenticated();
+      allow write: if isDeanOrHOD();
+    }
+
+    // 4. Attendance Logs Collection
+    match /attendance_logs/{recordId} {
+      // Students can ONLY read their own USN attendance records
+      allow read: if isDeanOrHOD() || isFaculty() || (isStudent() && resource.data.usn == request.auth.token.usn);
+      
+      // Faculty can create attendance for their allotted slots
+      allow create: if isFaculty() && request.resource.data.markedBy == request.auth.uid;
+      
+      // Strict 24-Hour Edit Window: Faculty can only update attendance within 24 hours of class slot
+      allow update: if isDeanOrHOD() || (
+        isFaculty() && 
+        resource.data.markedBy == request.auth.uid && 
+        request.time < resource.data.slot_start_time + duration.value(24, 'h')
+      );
+      
+      // Delete strictly restricted to Dean/HOD override
+      allow delete: if isDeanOrHOD();
+    }
+
+    // 5. OD & Leave Requests
+    match /od_leave_requests/{requestId} {
+      allow read: if isDeanOrHOD() || isFaculty() || (isStudent() && resource.data.usn == request.auth.token.usn);
+      allow create: if isStudent() && request.resource.data.usn == request.auth.token.usn;
+      allow update: if isDeanOrHOD() || isFaculty(); // Faculty / HOD approves or rejects
+      allow delete: if isDeanOrHOD();
+    }
+
+    // 6. Faculty Punch Logs (Campus Geo-Fence Verification)
+    match /faculty_punch_logs/{punchId} {
+      allow read: if isDeanOrHOD() || (isFaculty() && resource.data.facultyId == request.auth.uid);
+      allow create: if isFaculty() && request.resource.data.facultyId == request.auth.uid;
+      allow update, delete: if isDeanOrHOD();
+    }
+  }
+}
